@@ -1,0 +1,64 @@
+/* Home card preview keeps markdown tidy inside the grid cards */
+.home-card-preview {
+  position: relative;
+  /* max-height: 15rem; */
+  height: 100%;
+  overflow: hidden;
+  padding: 24px;
+  background: var(--background);
+}
+
+.home-card-preview::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3rem;
+  pointer-events: none;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--background) 5%, transparent), var(--background));
+  opacity: 1;
+  transition: opacity 150ms ease;
+}
+
+.group:hover .home-card-preview::after,
+.group:focus-visible .home-card-preview::after {
+  opacity: 1;
+}
+
+.home-card-preview__content {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  max-width: none;
+}
+
+.home-card-preview__content > :first-child {
+  margin-top: 0;
+}
+
+.home-card-preview__content h1,
+.home-card-preview__content h2,
+.home-card-preview__content h3,
+.home-card-preview__content h4 {
+  font-size: 1rem;
+  /* margin-top: 0.75rem; */
+  /* margin-bottom: 0.5rem; */
+  border-bottom: none;
+}
+
+.home-card-preview__content h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  /* margin-top: 1rem; */
+  /* margin-bottom: 0.75rem; */
+}
+
+.home-card-preview__content pre {
+  display: none;
+}
+
+.home-card-preview__empty {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  margin: 0;
+}

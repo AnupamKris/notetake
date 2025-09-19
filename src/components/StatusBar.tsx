@@ -1,10 +1,15 @@
 import { cn } from "@/lib/utils";
+import { formatDistanceToNow, parseISO } from "date-fns";
 
 type StatusBarProps = {
   content: string;
   caret: number; // selectionStart index
   selectionLength?: number;
   className?: string;
+  isDirty?: boolean;
+  isSaving?: boolean;
+  isNewNote?: boolean;
+  updatedAt?: string;
 };
 
 function computeLineCol(text: string, index: number) {
@@ -21,16 +26,52 @@ function countWords(text: string) {
   return t.split(/\s+/).filter(Boolean).length;
 }
 
-export function StatusBar({ content, caret, selectionLength = 0, className }: StatusBarProps) {
+function formatUpdated(iso?: string) {
+  if (!iso) {
+    return "";
+  }
+  try {
+    return formatDistanceToNow(parseISO(iso), { addSuffix: true });
+  } catch {
+    return "";
+  }
+}
+
+export function StatusBar({
+  content,
+  caret,
+  selectionLength = 0,
+  className,
+  isDirty,
+  isSaving,
+  isNewNote,
+  updatedAt,
+}: StatusBarProps) {
   const totalLines = content.length ? content.split(/\r?\n/).length : 1;
   const chars = content.length;
   const words = countWords(content);
   const { line, col } = computeLineCol(content, caret);
+  const statusParts: string[] = [];
+
+  if (isSaving) {
+    statusParts.push("Saving...");
+  } else if (isNewNote) {
+    statusParts.push("New note");
+  } else {
+    const relative = formatUpdated(updatedAt);
+    if (relative) {
+      statusParts.push(`Updated ${relative}`);
+    }
+  }
+
+  if (isDirty && !isSaving) {
+    statusParts.push("Unsaved changes");
+  }
 
   return (
     <div
       className={cn(
-        "bg-card/60 text-muted-foreground border-border grid h-7 grid-flow-col auto-cols-max items-center gap-4 whitespace-nowrap border-t px-3 text-[12px]",
+        "bg-card/60 text-muted-foreground border-border flex h-7 gap-3 items-center gap-4 whitespace-nowrap border-t px-3 text-[12px]",
         className,
       )}
       role="status"
@@ -42,6 +83,7 @@ export function StatusBar({ content, caret, selectionLength = 0, className }: St
       <span>Words {words}</span>
       <span>Chars {chars}</span>
       {selectionLength > 0 ? <span>Selected {selectionLength}</span> : null}
+      {statusParts.length > 0 ? <span className="ml-auto">{statusParts.join(" • ")}</span> : null}
     </div>
   );
 }

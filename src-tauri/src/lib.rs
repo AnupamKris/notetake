@@ -72,16 +72,22 @@ fn save_index(app: &AppHandle, notes: &[StoredNoteMetadata]) -> Result<(), Strin
 }
 
 fn preview_from_content(content: &str) -> String {
+    // Preserve line breaks so markdown blocks (headings, lists, quotes)
+    // still render correctly in the home card preview.
     let mut preview = String::new();
     for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let trimmed = line.trim_end();
+        // Skip leading empty lines but keep subsequent empties to delimit blocks
+        if preview.is_empty() && trimmed.trim().is_empty() {
             continue;
         }
+
         if !preview.is_empty() {
-            preview.push(' ');
+            preview.push('\n');
         }
+
         preview.push_str(trimmed);
+
         if preview.len() > PREVIEW_MAX_CHARS {
             break;
         }

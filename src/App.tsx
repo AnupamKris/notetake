@@ -1,4 +1,5 @@
 ﻿import "./index.css";
+import "./utils.css"
 import { useEffect, useMemo, useState } from "react";
 import {
   NoteDocument,
@@ -212,11 +213,17 @@ export default function App() {
         appName="QuickMark"
         hasActiveNote={!!activeNote}
         canSave={!!activeNote && isDirty && !isSaving}
+        isSaving={isSaving}
+        isDirty={isDirty}
+        noteTitle={title}
+        showPreview={showPreview}
         onNew={startNewNote}
         onSave={handleSave}
         onDelete={handleDelete}
         onTogglePreview={() => setShowPreview((v) => !v)}
         onOpenPalette={() => setCmdOpen(true)}
+        onBack={handleBack}
+        onTitleChange={setTitle}
       />
       <Toaster closeButton position="top-right" />
       <CommandPalette
@@ -270,20 +277,14 @@ export default function App() {
         />
       ) : (
         <EditorView
-          title={title}
           content={content}
-          updatedAt={activeNote.updatedAt}
-          isNewNote={isNewNote}
+          isLoading={isNoteLoading}
+          onContentChange={setContent}
+          showPreview={showPreview}
           isDirty={isDirty}
           isSaving={isSaving}
-          isLoading={isNoteLoading}
-          onTitleChange={setTitle}
-          onContentChange={setContent}
-          onSave={handleSave}
-          onDelete={handleDelete}
-          onBack={handleBack}
-          showPreview={showPreview}
-          onTogglePreview={() => setShowPreview((v) => !v)}
+          isNewNote={isNewNote}
+          updatedAt={activeNote?.updatedAt ?? ""}
         />
       )}
     </div>
