@@ -14,6 +14,7 @@ import TitleBar from "@/components/TitleBar";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ShareDialog, { PeerInfo } from "@/components/ShareDialog";
+import IncomingTransferDialog from "@/components/IncomingTransferDialog";
 import useHotkeys from "@/hooks/use-hotkeys";
 import HomeView from "@/components/home/HomeView";
 import EditorView from "@/components/editor/EditorView";
@@ -46,6 +47,8 @@ export default function App() {
   const [shareBusy, setShareBusy] = useState(false);
   const [shareMode, setShareMode] = useState<"all" | "current">("all");
   const [netStatus, setNetStatus] = useState("");
+  const [incomingOpen, setIncomingOpen] = useState(false);
+  const [incomingOffer, setIncomingOffer] = useState<{ id: string; peer: string; kind: string; size: number; filename: string } | null>(null);
 
   useEffect(() => {
     refreshNotes();
@@ -200,15 +203,16 @@ export default function App() {
   }
 
   async function handleReceiveNotes() {
-    setNetStatus("Waiting to receive…");
+    setNetStatus("Listening for senders…");
     try {
-      await invoke<string>("receive_notes", { timeoutSecs: 120 });
+      await invoke<string>("start_receive_service");
+      toast.success("Now listening for incoming shares");
     } catch (e) {
       console.error(e);
-      toast.error("Receive timed out or failed");
+      toast.error("Failed to start receiver");
       setNetStatus("Receive failed");
+      setTimeout(() => setNetStatus(""), 4000);
     }
-    setTimeout(() => setNetStatus(""), 4000);
   }
 
   async function handleSendCurrentNote() {
@@ -275,6 +279,16 @@ export default function App() {
         })
       );
       unsubs.push(
+        await listen("share://recv_offer", ({ payload }) => {
+          const p = payload as any;
+          if (p?.id) {
+            setIncomingOffer(p as any);
+            setIncomingOpen(true);
+            setNetStatus("Incoming share…");
+          }
+        })
+      );
+      unsubs.push(
         await listen("share://recv_status", ({ payload }) => {
           const p = payload as any;
           if (p?.phase) setNetStatus(String(p.phase));
@@ -297,6 +311,27 @@ export default function App() {
     })();
     return () => { unsubs.forEach((u) => { try { u(); } catch {} }); };
   }, []);
+
+  async function acceptIncoming(id: string) {
+    try {
+      await invoke("accept_incoming_transfer", { id, accept: true });
+      setIncomingOpen(false);
+      setIncomingOffer(null);
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to accept");
+    }
+  }
+  async function rejectIncoming(id: string) {
+    try {
+      await invoke("accept_incoming_transfer", { id, accept: false });
+      setIncomingOpen(false);
+      setIncomingOffer(null);
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to reject");
+    }
+  }
 
   // Reflect discovery activity in status bar
   useEffect(() => {
@@ -436,6 +471,13 @@ export default function App() {
         onClose={() => setShareOpen(false)}
         onSelect={selectPeerAndSend}
         title={shareMode === "all" ? "Send All Notes" : "Send Current Note"}
+      />
+      <IncomingTransferDialog
+        open={incomingOpen}
+        offer={incomingOffer as any}
+        onAccept={acceptIncoming}
+        onReject={rejectIncoming}
+        onClose={() => setIncomingOpen(false)}
       />
     </div>
   );

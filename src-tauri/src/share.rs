@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
 use time::macros::format_description;
 use uuid::Uuid;
 use if_addrs::{get_if_addrs, IfAddr};
@@ -216,13 +219,22 @@ fn recv_file(stream: &mut TcpStream, out_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct TransferHeader {
     magic: String,
     kind: String, // all | single
     size: u64,
     filename: String,
 }
+
+struct PendingTransfer {
+    stream: Option<TcpStream>,
+    header: TransferHeader,
+    peer: SocketAddr,
+}
+
+static LISTENING: AtomicBool = AtomicBool::new(false);
+static PENDING: Lazy<Mutex<HashMap<String, PendingTransfer>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn send_header_and_wait_ack(stream: &mut TcpStream, kind: &str, size: u64, filename: &str) -> Result<(), String> {
     let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: kind.into(), size, filename: filename.into() };
@@ -232,14 +244,14 @@ fn send_header_and_wait_ack(stream: &mut TcpStream, kind: &str, size: u64, filen
     stream.write_all(&data).map_err(|e| e.to_string())?;
     stream.flush().ok();
     // Wait for small ACK "OK\n"
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
     let mut ack = [0u8; 3];
     stream.read_exact(&mut ack).map_err(|e| e.to_string())?;
     if &ack != b"OK\n" { return Err("Receiver did not ACK".into()); }
     Ok(())
 }
 
-fn recv_header_and_ack(stream: &mut TcpStream) -> Result<TransferHeader, String> {
+fn recv_header(stream: &mut TcpStream) -> Result<TransferHeader, String> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len_buf);
@@ -247,58 +259,106 @@ fn recv_header_and_ack(stream: &mut TcpStream) -> Result<TransferHeader, String>
     stream.read_exact(&mut data).map_err(|e| e.to_string())?;
     let header: TransferHeader = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
     if header.magic != TRANSFER_MAGIC { return Err("Bad transfer header".into()); }
-    stream.write_all(b"OK\n").map_err(|e| e.to_string())?;
     Ok(header)
 }
 
 #[tauri::command]
-pub fn receive_notes(app: AppHandle, timeout_secs: Option<u64>) -> Result<String, String> {
-    let timeout = timeout_secs.unwrap_or(120);
-    let app_clone = app.clone();
+pub fn start_receive_service(app: AppHandle) -> Result<String, String> {
+    if LISTENING.swap(true, Ordering::SeqCst) {
+        let _ = app.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
+        return Ok("already".into());
+    }
+    let app_udp = app.clone();
     std::thread::spawn(move || {
-        let notes_dir_path = match notes_dir(&app_clone) { Ok(p) => p, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; } };
-        let udp = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) { Ok(s) => s, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        udp.set_read_timeout(Some(Duration::from_secs(timeout))).ok();
-        let listener = match TcpListener::bind(("0.0.0.0", TRANSFER_PORT)) { Ok(l) => l, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        let _ = app_clone.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
-        let mut buf = [0u8; 2048];
-        let (n, from) = match udp.recv_from(&mut buf) { Ok(x)=>x, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":format!("Discovery error: {}", e)})); return; } };
-        let msg: DiscoveryPing = match serde_json::from_slice(&buf[..n]) { Ok(m)=>m, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        if msg.magic != DISCOVERY_MAGIC || msg.kind != "ping" { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":"Unexpected discovery message"})); return; }
-        let pong = DiscoveryPing { magic: DISCOVERY_MAGIC.to_string(), kind: "pong".into(), name: host_name_fallback(), transfer_port: TRANSFER_PORT, id: Uuid::new_v4().to_string() };
-        let pong_bytes = serde_json::to_vec(&pong).unwrap_or_default();
-        let _ = udp.send_to(&pong_bytes, from);
-        let _ = app_clone.emit("share://recv_status", &serde_json::json!({"phase":"awaiting_transfer","from":from.to_string()}));
-        let (mut stream, peer_addr) = match listener.accept() { Ok(x)=>x, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        // Handshake header
-        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(30))) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; }
-        let header = match recv_header_and_ack(&mut stream) { Ok(h)=>h, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; } };
-        let zip_tmp = notes_dir_path.join("incoming_notes.zip");
-        if let Err(e) = recv_file(&mut stream, &zip_tmp) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
-        let temp_extract = notes_dir_path.join("incoming_tmp");
-        let _ = fs::remove_dir_all(&temp_extract);
-        if let Err(e) = fs::create_dir_all(&temp_extract) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; }
-        if let Err(e) = unzip_into(&temp_extract, &zip_tmp) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
-        let incoming_index_path = temp_extract.join("index.json");
-        let incoming_index_str = match fs::read_to_string(&incoming_index_path) { Ok(s)=>s, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        let incoming_index: Vec<StoredNoteMetadata> = match serde_json::from_str(&incoming_index_str) { Ok(v)=>v, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        if let Ok(rd) = fs::read_dir(&temp_extract) {
-            for entry in rd {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                        if let Some(file_name) = path.file_name() { let _ = fs::copy(&path, notes_dir_path.join(file_name)); }
+        let udp = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) { Ok(s) => s, Err(e) => { let _=app_udp.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        let _ = app_udp.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
+        udp.set_read_timeout(Some(Duration::from_millis(1000))).ok();
+        loop {
+            let mut buf = [0u8; 2048];
+            match udp.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    if let Ok(msg) = serde_json::from_slice::<DiscoveryPing>(&buf[..n]) {
+                        if msg.magic == DISCOVERY_MAGIC && msg.kind == "ping" {
+                            let pong = DiscoveryPing { magic: DISCOVERY_MAGIC.to_string(), kind: "pong".into(), name: host_name_fallback(), transfer_port: TRANSFER_PORT, id: Uuid::new_v4().to_string() };
+                            let pong_bytes = serde_json::to_vec(&pong).unwrap_or_default();
+                            let _ = udp.send_to(&pong_bytes, from);
+                        }
                     }
                 }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    // keep looping
+                }
+                Err(_) => { /* ignore */ }
             }
         }
-        let dest_index_path = notes_dir_path.join("index.json");
-        if let Err(e) = merge_index(&dest_index_path, &incoming_index) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
-        let _ = fs::remove_file(zip_tmp);
-        let _ = fs::remove_dir_all(temp_extract);
-        let _ = app_clone.emit("share://recv_done", &serde_json::json!({"ok":true,"message":format!("Received {} bytes from {}", header.size, peer_addr)}));
     });
+
+    let app_tcp = app.clone();
+    std::thread::spawn(move || {
+        let listener = match TcpListener::bind(("0.0.0.0", TRANSFER_PORT)) { Ok(l) => l, Err(e) => { let _=app_tcp.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        loop {
+            match listener.accept() {
+                Ok((mut stream, peer_addr)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(180)));
+                    match recv_header(&mut stream) {
+                        Ok(header) => {
+                            let id = Uuid::new_v4().to_string();
+                            {
+                                let mut map = PENDING.lock().unwrap();
+                                map.insert(id.clone(), PendingTransfer { stream: Some(stream), header: header.clone(), peer: peer_addr });
+                            }
+                            let _ = app_tcp.emit("share://recv_offer", &serde_json::json!({
+                                "id": id,
+                                "peer": peer_addr.to_string(),
+                                "kind": header.kind,
+                                "size": header.size,
+                                "filename": header.filename
+                            }));
+                        }
+                        Err(e) => {
+                            let _ = app_tcp.emit("share://recv_done", &serde_json::json!({"ok":false,"message":format!("Bad header: {}", e)}));
+                        }
+                    }
+                }
+                Err(_) => { /* ignore transient */ }
+            }
+        }
+    });
+
     Ok("started".into())
+}
+
+#[tauri::command]
+pub fn accept_incoming_transfer(app: AppHandle, id: String, accept: bool) -> Result<(), String> {
+    let notes_dir_path = notes_dir(&app)?;
+    let mut map = PENDING.lock().unwrap();
+    let mut pending = map.remove(&id).ok_or_else(|| "No such transfer".to_string())?;
+    let mut stream = pending.stream.take().ok_or_else(|| "Stream missing".to_string())?;
+    if !accept {
+        let _ = stream.write_all(b"NO\n");
+        let _ = app.emit("share://recv_done", &serde_json::json!({"ok":false,"message":"Rejected"}));
+        return Ok(());
+    }
+    // ACK and receive
+    stream.write_all(b"OK\n").map_err(|e| e.to_string())?;
+    let zip_tmp = notes_dir_path.join("incoming_notes.zip");
+    recv_file(&mut stream, &zip_tmp)?;
+    let temp_extract = notes_dir_path.join("incoming_tmp");
+    let _ = fs::remove_dir_all(&temp_extract);
+    fs::create_dir_all(&temp_extract).map_err(|e| e.to_string())?;
+    unzip_into(&temp_extract, &zip_tmp)?;
+    let incoming_index_path = temp_extract.join("index.json");
+    let incoming_index_str = fs::read_to_string(&incoming_index_path).map_err(|e| e.to_string())?;
+    let incoming_index: Vec<StoredNoteMetadata> = serde_json::from_str(&incoming_index_str).map_err(|e| e.to_string())?;
+    if let Ok(rd) = fs::read_dir(&temp_extract) {
+        for entry in rd { if let Ok(entry) = entry { let path = entry.path(); if path.extension().and_then(|s| s.to_str()) == Some("md") { if let Some(file_name) = path.file_name() { let _ = fs::copy(&path, notes_dir_path.join(file_name)); } } } }
+    }
+    let dest_index_path = notes_dir_path.join("index.json");
+    merge_index(&dest_index_path, &incoming_index)?;
+    let _ = fs::remove_file(zip_tmp);
+    let _ = fs::remove_dir_all(temp_extract);
+    let _ = app.emit("share://recv_done", &serde_json::json!({"ok":true,"message":format!("Received {} bytes from {}", pending.header.size, pending.peer)}));
+    Ok(())
 }
 
 #[tauri::command]

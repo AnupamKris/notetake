@@ -17,12 +17,13 @@
     "load_note",
     "save_note",
     "delete_note",
-    "receive_notes",
+    "start_receive_service",
     "send_all_notes",
     "discover_receivers",
     "send_all_notes_to",
     "send_note_to",
     "start_send_all_notes_to",
-    "start_send_note_to"
+    "start_send_note_to",
+    "accept_incoming_transfer"
   ]
 }

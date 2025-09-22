@@ -26,24 +26,34 @@ export default function ShareDialog({ open, peers, busy, title = "Select a recei
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
           {peers.length === 0 ? (
             <div className="text-sm text-muted-foreground">{busy ? "Searching…" : "No receivers found yet."}</div>
           ) : (
-            peers.map((p) => (
-              <Button key={`${p.ip}:${p.port}`} variant="secondary" className="justify-between" onClick={() => onSelect(p)}>
-                <span className="truncate">{p.name || p.ip}</span>
-                <span className="text-muted-foreground text-xs">{p.ip}:{p.port}</span>
-              </Button>
-            ))
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {peers.map((p) => (
+                <button
+                  key={`${p.ip}:${p.port}`}
+                  onClick={() => onSelect(p)}
+                  className="flex items-center gap-3 rounded-md border p-3 text-left hover:bg-muted/50"
+                >
+                  <div className="bg-muted text-foreground/80 flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium">
+                    {(p.name || p.ip).slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{p.name || p.ip}</div>
+                    <div className="text-muted-foreground text-xs truncate">{p.ip}:{p.port}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
           )}
-          <div className="mt-2 flex gap-2 justify-end">
-            <Button variant="outline" onClick={onRefresh} disabled={!!busy}>Refresh</Button>
-            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <div className="mt-1 flex gap-2 justify-end">
+            <Button variant="outline" onClick={onRefresh} disabled={!!busy}>{busy ? "Scanning…" : "Scan Again"}</Button>
+            <Button variant="ghost" onClick={onClose}>Close</Button>
           </div>
         </div>
       </DialogContent>
     </Dialog>
   );
 }
-
