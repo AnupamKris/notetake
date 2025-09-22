@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Textarea } from "@/components/ui/textarea";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
@@ -14,6 +15,7 @@ export type EditorViewProps = {
   isLoading: boolean;
   onContentChange: (value: string) => void;
   showPreview: boolean;
+  showEditor: boolean;
   isDirty: boolean;
   isSaving: boolean;
   isNewNote: boolean;
@@ -26,6 +28,7 @@ export default function EditorView(props: EditorViewProps) {
     isLoading,
     onContentChange,
     showPreview,
+    showEditor,
     isDirty,
     isSaving,
     isNewNote,
@@ -47,6 +50,8 @@ export default function EditorView(props: EditorViewProps) {
     };
   }, []);
 
+  const nothingVisible = !showEditor && !showPreview;
+
   return (
     <main className="flex h-full min-h-0 flex-col">
       <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -56,12 +61,70 @@ export default function EditorView(props: EditorViewProps) {
             Loading note.
           </div>
         ) : null}
-        <ResizablePanelGroup
-          direction="horizontal"
-          className={cn("border-border relative flex h-full min-h-0 border-t", isLoading ? "pointer-events-none opacity-60" : "")}
-        >
-          <ResizablePanel defaultSize={showPreview ? 60 : 100} minSize={20} collapsible>
-            <div className="flex h-full min-h-0 flex-col">
+        {nothingVisible ? (
+          <div className="h-full w-full flex items-center justify-center">
+            <div className="text-center text-sm text-muted-foreground space-y-3">
+              <p className="text-base font-medium text-foreground">Nothing to show</p>
+              <p>Use these shortcuts to get going:</p>
+              <div className="grid gap-1">
+                <p><span className="font-mono">Ctrl+E</span> — Toggle Editor</p>
+                <p><span className="font-mono">Ctrl+\\</span> — Toggle Preview</p>
+                <p><span className="font-mono">Ctrl+S</span> — Save Note</p>
+                <p><span className="font-mono">Ctrl+N</span> — New Note</p>
+                <p><span className="font-mono">Ctrl+K</span> — Command Palette</p>
+              </div>
+            </div>
+          </div>
+        ) : showEditor && showPreview ? (
+          <ResizablePanelGroup
+            dir="ltr"
+            direction="horizontal"
+            className={cn("border-border relative flex h-full min-h-0 border-t", isLoading ? "pointer-events-none opacity-60" : "")}
+          >
+            <ResizablePanel defaultSize={60} minSize={20} collapsible>
+              <div className="flex h-full min-h-0 flex-col">
+                <Textarea
+                  value={content}
+                  ref={textareaRef}
+                  onChange={(event) => {
+                    onContentChange(event.target.value);
+                    setCaret(event.currentTarget.selectionStart || 0);
+                    setSelLen((event.currentTarget.selectionEnd || 0) - (event.currentTarget.selectionStart || 0));
+                  }}
+                  onSelect={(event) => {
+                    setCaret(event.currentTarget.selectionStart || 0);
+                    setSelLen((event.currentTarget.selectionEnd || 0) - (event.currentTarget.selectionStart || 0));
+                  }}
+                  className="flex-1 min-h-0 resize-none rounded-none border-0 bg-transparent p-4 font-mono text-sm leading-relaxed"
+                />
+              </div>
+            </ResizablePanel>
+
+            <ResizableHandle withHandle className="bg-muted" />
+
+            <ResizablePanel defaultSize={40} minSize={20} collapsible>
+              <div className="flex h-full w-full min-h-0 flex-col">
+                <div className="markdown-preview h-full min-h-0 overflow-auto px-4 py-4 text-sm leading-relaxed w-full">
+                  {content.trim().length === 0 ? (
+                    <p className="text-muted-foreground">Nothing to preview yet.</p>
+                  ) : (
+                    <ReactMarkdown
+                      components={markdownComponents}
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+                      className="w-full"
+                    >
+                      {content}
+                    </ReactMarkdown>
+                  )}
+                </div>
+              </div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : showEditor ? (
+          <div className={cn("border-border relative flex h-full min-h-0 border-t", isLoading ? "pointer-events-none opacity-60" : "")}
+          >
+            <div className="flex h-full min-h-0 flex-col w-full">
               <Textarea
                 value={content}
                 ref={textareaRef}
@@ -77,27 +140,28 @@ export default function EditorView(props: EditorViewProps) {
                 className="flex-1 min-h-0 resize-none rounded-none border-0 bg-transparent p-4 font-mono text-sm leading-relaxed"
               />
             </div>
-          </ResizablePanel>
-
-          {showPreview ? (
-            <>
-              <ResizableHandle withHandle className="bg-muted" />
-              <ResizablePanel defaultSize={40} minSize={20} collapsible>
-                <div className="flex h-full w-full min-h-0 flex-col">
-                  <div className="markdown-preview h-full min-h-0 overflow-auto px-4 py-4 text-sm leading-relaxed w-full">
-                    {content.trim().length === 0 ? (
-                      <p className="text-muted-foreground">Nothing to preview yet.</p>
-                    ) : (
-                      <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]} className="w-full">
-                        {content}
-                      </ReactMarkdown>
-                    )}
-                  </div>
-                </div>
-              </ResizablePanel>
-            </>
-          ) : null}
-        </ResizablePanelGroup>
+          </div>
+        ) : (
+          <div className={cn("border-border relative flex h-full min-h-0 border-t", isLoading ? "pointer-events-none opacity-60" : "")}
+          >
+            <div className="flex h-full w-full min-h-0 flex-col">
+              <div className="markdown-preview h-full min-h-0 overflow-auto px-4 py-4 text-sm leading-relaxed w-full">
+                {content.trim().length === 0 ? (
+                  <p className="text-muted-foreground">Nothing to preview yet.</p>
+                ) : (
+                  <ReactMarkdown
+                    components={markdownComponents}
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+                    className="w-full"
+                  >
+                    {content}
+                  </ReactMarkdown>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       <StatusBar
         content={content}

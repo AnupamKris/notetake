@@ -53,7 +53,23 @@
 }
 
 .home-card-preview__content pre {
-  display: none;
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  background-color: var(--code-bg, color-mix(in srgb, var(--muted) 20%, transparent));
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  max-height: 8rem;
+  overflow: hidden;
+  margin: 0.5rem 0;
+}
+
+.home-card-preview__content pre code {
+  background: transparent;
+  padding: 0;
 }
 
 .home-card-preview__empty {

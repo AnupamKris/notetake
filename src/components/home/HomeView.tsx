@@ -5,6 +5,7 @@ import { Loader2, Plus } from "lucide-react";
 import { NoteSummary } from "@/lib/notes";
 import { formatDistanceToNow, parseISO } from "date-fns";
 import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import "@/home-card.css"
 
@@ -60,7 +61,11 @@ export default function HomeView({ notes, isLoading, onCreateNote, onOpenNote }:
                     <div className="bg-muted/30 group-hover:bg-muted/40 max-h-48 h-full">
                       <div className="home-card-preview">
                         {note.preview ? (
-                          <ReactMarkdown className="home-card-preview__content pointer-events-none" remarkPlugins={[remarkGfm]}>
+                          <ReactMarkdown
+                            className="home-card-preview__content pointer-events-none"
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+                          >
                             {note.preview}
                           </ReactMarkdown>
                         ) : (

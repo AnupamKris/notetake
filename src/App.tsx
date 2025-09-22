@@ -36,6 +36,7 @@ export default function App() {
   const [isNoteLoading, setIsNoteLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
+  const [showEditor, setShowEditor] = useState(true);
   const [cmdOpen, setCmdOpen] = useState(false);
 
   useEffect(() => {
@@ -89,6 +90,9 @@ export default function App() {
     setTitle(newNote.title);
     setContent(newNote.content);
     setIsNewNote(true);
+    // For a new note, default to showing the editor
+    setShowEditor(true);
+    setShowPreview(true);
   }
 
   async function openExistingNote(noteId: string) {
@@ -103,6 +107,9 @@ export default function App() {
       setTitle(note.title);
       setContent(note.content);
       setIsNewNote(false);
+      // When opening from home, start in view-only mode
+      setShowEditor(false);
+      setShowPreview(true);
     } catch (error) {
       console.error(error);
       toast.error("Could not open that note");
@@ -194,6 +201,11 @@ export default function App() {
       handler: () => startNewNote(),
     },
     {
+      combo: "mod+e",
+      enabled: () => !!activeNote,
+      handler: () => setShowEditor((v) => !v),
+    },
+    {
       combo: "mod+\\",
       enabled: () => !!activeNote,
       handler: () => setShowPreview((v) => !v),
@@ -281,6 +293,7 @@ export default function App() {
           isLoading={isNoteLoading}
           onContentChange={setContent}
           showPreview={showPreview}
+          showEditor={showEditor}
           isDirty={isDirty}
           isSaving={isSaving}
           isNewNote={isNewNote}
