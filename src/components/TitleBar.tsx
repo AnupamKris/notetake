@@ -31,6 +31,8 @@ type TitleBarProps = {
   onOpenPalette?: () => void;
   onBack?: () => void;
   onTitleChange?: (value: string) => void;
+  onSendNotes?: () => void;
+  onReceiveNotes?: () => void;
 };
 
 export function TitleBar({
@@ -49,6 +51,8 @@ export function TitleBar({
   onOpenPalette,
   onBack,
   onTitleChange,
+  onSendNotes,
+  onReceiveNotes,
 }: TitleBarProps) {
   const appWindow = getCurrentWindow();
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -121,6 +125,13 @@ export function TitleBar({
               </MenubarItem>
               <MenubarSeparator />
               <MenubarItem onClick={() => appWindow.close()}>Quit</MenubarItem>
+            </MenubarContent>
+          </MenubarMenu>
+          <MenubarMenu>
+            <MenubarTrigger className="px-2">Share</MenubarTrigger>
+            <MenubarContent>
+              <MenubarItem onClick={onSendNotes}>Send Notes (All)</MenubarItem>
+              <MenubarItem onClick={onReceiveNotes}>Receive Notes</MenubarItem>
             </MenubarContent>
           </MenubarMenu>
           <MenubarMenu>

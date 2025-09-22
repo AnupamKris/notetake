@@ -5,6 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+mod share;
 
 const NOTES_DIR: &str = "notes";
 const INDEX_FILE: &str = "index.json";
@@ -12,7 +13,7 @@ const PREVIEW_MAX_CHARS: usize = 200;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct StoredNoteMetadata {
+pub(crate) struct StoredNoteMetadata {
     id: String,
     title: String,
     updated_at: String,
@@ -36,7 +37,7 @@ struct NoteDocument {
     updated_at: String,
 }
 
-fn notes_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn notes_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_data_dir()
@@ -193,7 +194,14 @@ fn delete_note(app: AppHandle, id: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_notes, load_note, save_note, delete_note])
+        .invoke_handler(tauri::generate_handler![
+            list_notes,
+            load_note,
+            save_note,
+            delete_note,
+            share::receive_notes,
+            share::send_all_notes
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

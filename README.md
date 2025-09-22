@@ -1,7 +1,24 @@
-# Tauri + React + Typescript
+# QuickMark
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+QuickMark is a fast, minimal notes app built with Tauri + React.
+
+## LAN Sharing (Wi‑Fi)
+
+Share notes with another QuickMark instance on the same network.
+
+- Menu → Share → "Send Notes (All)": broadcasts and auto‑detects the first receiver, then sends all notes.
+- Menu → Share → "Receive Notes": listens up to 2 minutes and imports received notes.
+
+Notes transfer via UDP discovery on port `51515` and TCP on port `51516`. The receiver merges `index.json` entries by `updatedAt` and copies `*.md` files.
+
+Tip: If your OS firewall prompts, allow QuickMark on private networks.
+
+## Development
+
+- Install Rust and Node.js + pnpm
+- `pnpm install`
+- `pnpm tauri dev`
 
 ## Recommended IDE Setup
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- VS Code + Tauri extension + rust-analyzer

@@ -12,5 +12,12 @@
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging"
   ],
-  "commands": ["list_notes", "load_note", "save_note", "delete_note"]
+  "commands": [
+    "list_notes",
+    "load_note",
+    "save_note",
+    "delete_note",
+    "receive_notes",
+    "send_all_notes"
+  ]
 }

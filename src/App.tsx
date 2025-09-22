@@ -11,6 +11,7 @@ import {
 } from "@/lib/notes";
 import { toast, Toaster } from "sonner";
 import TitleBar from "@/components/TitleBar";
+import { invoke } from "@tauri-apps/api/core";
 import useHotkeys from "@/hooks/use-hotkeys";
 import HomeView from "@/components/home/HomeView";
 import EditorView from "@/components/editor/EditorView";
@@ -186,6 +187,28 @@ export default function App() {
     await refreshNotes();
   }
 
+  async function handleSendAllNotes() {
+    try {
+      const res = await invoke<string>("send_all_notes", { waitSecs: 10 });
+      toast.success(res || "Notes sent");
+    } catch (e) {
+      console.error(e);
+      toast.error("No receiver found on network");
+    }
+  }
+
+  async function handleReceiveNotes() {
+    toast.info("Waiting for sender… make sure both are on same Wi‑Fi");
+    try {
+      const res = await invoke<string>("receive_notes", { timeoutSecs: 120 });
+      await refreshNotes();
+      toast.success(res || "Received notes");
+    } catch (e) {
+      console.error(e);
+      toast.error("Receive timed out or failed");
+    }
+  }
+
   const sortedNotes = useMemo(() => sortByUpdated(notes), [notes]);
   // Keyboard shortcuts: mod = Ctrl on Windows/Linux, Cmd on macOS
   useHotkeys([
@@ -236,6 +259,8 @@ export default function App() {
         onOpenPalette={() => setCmdOpen(true)}
         onBack={handleBack}
         onTitleChange={setTitle}
+        onSendNotes={handleSendAllNotes}
+        onReceiveNotes={handleReceiveNotes}
       />
       <Toaster closeButton position="top-right" />
       <CommandPalette
