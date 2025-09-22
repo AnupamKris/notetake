@@ -72,7 +72,7 @@ fn save_index(app: &AppHandle, notes: &[StoredNoteMetadata]) -> Result<(), Strin
     fs::write(path, data).map_err(|e| e.to_string())
 }
 
-fn preview_from_content(content: &str) -> String {
+pub(crate) fn preview_from_content(content: &str) -> String {
     // Preserve line breaks so markdown blocks (headings, lists, quotes)
     // still render correctly in the home card preview.
     let mut preview = String::new();
@@ -206,7 +206,8 @@ pub fn run() {
             share::send_note_to,
             share::start_send_all_notes_to,
             share::start_send_note_to,
-            share::accept_incoming_transfer
+            share::accept_incoming_transfer,
+            share::stop_receive_service
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

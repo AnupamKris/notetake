@@ -1,4 +1,4 @@
-use crate::{notes_dir, StoredNoteMetadata};
+use crate::{notes_dir, StoredNoteMetadata, preview_from_content};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -225,6 +225,9 @@ struct TransferHeader {
     kind: String, // all | single
     size: u64,
     filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")] note_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] note_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] notes_count: Option<u32>,
 }
 
 struct PendingTransfer {
@@ -234,11 +237,11 @@ struct PendingTransfer {
 }
 
 static LISTENING: AtomicBool = AtomicBool::new(false);
+static RECEIVER_STOP: AtomicBool = AtomicBool::new(false);
 static PENDING: Lazy<Mutex<HashMap<String, PendingTransfer>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn send_header_and_wait_ack(stream: &mut TcpStream, kind: &str, size: u64, filename: &str) -> Result<(), String> {
-    let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: kind.into(), size, filename: filename.into() };
-    let data = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
+fn send_header_and_wait_ack(stream: &mut TcpStream, header: &TransferHeader) -> Result<(), String> {
+    let data = serde_json::to_vec(header).map_err(|e| e.to_string())?;
     let len: u32 = data.len() as u32;
     stream.write_all(&len.to_be_bytes()).map_err(|e| e.to_string())?;
     stream.write_all(&data).map_err(|e| e.to_string())?;
@@ -247,6 +250,7 @@ fn send_header_and_wait_ack(stream: &mut TcpStream, kind: &str, size: u64, filen
     stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
     let mut ack = [0u8; 3];
     stream.read_exact(&mut ack).map_err(|e| e.to_string())?;
+    if &ack == b"NO\n" { return Err("Rejected by receiver".into()); }
     if &ack != b"OK\n" { return Err("Receiver did not ACK".into()); }
     Ok(())
 }
@@ -268,12 +272,13 @@ pub fn start_receive_service(app: AppHandle) -> Result<String, String> {
         let _ = app.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
         return Ok("already".into());
     }
+    RECEIVER_STOP.store(false, Ordering::SeqCst);
     let app_udp = app.clone();
     std::thread::spawn(move || {
         let udp = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) { Ok(s) => s, Err(e) => { let _=app_udp.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
         let _ = app_udp.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
-        udp.set_read_timeout(Some(Duration::from_millis(1000))).ok();
-        loop {
+        udp.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        while !RECEIVER_STOP.load(Ordering::SeqCst) {
             let mut buf = [0u8; 2048];
             match udp.recv_from(&mut buf) {
                 Ok((n, from)) => {
@@ -291,12 +296,14 @@ pub fn start_receive_service(app: AppHandle) -> Result<String, String> {
                 Err(_) => { /* ignore */ }
             }
         }
+        let _ = app_udp.emit("share://recv_status", &serde_json::json!({"phase":"stopped"}));
     });
 
     let app_tcp = app.clone();
     std::thread::spawn(move || {
         let listener = match TcpListener::bind(("0.0.0.0", TRANSFER_PORT)) { Ok(l) => l, Err(e) => { let _=app_tcp.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
-        loop {
+        let _ = listener.set_nonblocking(true);
+        while !RECEIVER_STOP.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, peer_addr)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(180)));
@@ -320,12 +327,27 @@ pub fn start_receive_service(app: AppHandle) -> Result<String, String> {
                         }
                     }
                 }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
                 Err(_) => { /* ignore transient */ }
             }
         }
     });
 
     Ok("started".into())
+}
+
+#[tauri::command]
+pub fn stop_receive_service(app: AppHandle) -> Result<(), String> {
+    if !LISTENING.load(Ordering::SeqCst) {
+        let _ = app.emit("share://recv_status", &serde_json::json!({"phase":"stopped"}));
+        return Ok(());
+    }
+    RECEIVER_STOP.store(true, Ordering::SeqCst);
+    LISTENING.store(false, Ordering::SeqCst);
+    let _ = app.emit("share://recv_status", &serde_json::json!({"phase":"stopping"}));
+    Ok(())
 }
 
 #[tauri::command]
@@ -457,7 +479,8 @@ fn send_zip_to(zip_path: &Path, ip: &str, port: u16) -> Result<String, String> {
     let target: SocketAddr = format!("{}:{}", ip, port).parse::<SocketAddr>().map_err(|e| e.to_string())?;
     let mut stream = TcpStream::connect(target).map_err(|e| e.to_string())?;
     let size = fs::metadata(zip_path).map_err(|e| e.to_string())?.len();
-    send_header_and_wait_ack(&mut stream, "all", size, zip_path.file_name().and_then(|s| s.to_str()).unwrap_or("notes.zip"))?;
+    let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: "all".into(), size, filename: zip_path.file_name().and_then(|s| s.to_str()).unwrap_or("notes.zip").into(), note_title: None, note_preview: None, notes_count: None };
+    send_header_and_wait_ack(&mut stream, &header)?;
     send_file(&mut stream, zip_path)?;
     Ok(format!("Sent to {}", target))
 }
@@ -491,11 +514,14 @@ pub fn start_send_all_notes_to(app: AppHandle, ip: String, port: u16) -> Result<
         let tmp_zip = notes_dir_path.join("outgoing_notes.zip");
         if let Err(e) = zip_notes_dir(&notes_dir_path, &tmp_zip) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; }
         let size = fs::metadata(&tmp_zip).ok().and_then(|m| Some(m.len())).unwrap_or(0);
+        // count notes
+        let idx_count = fs::read_to_string(notes_dir_path.join("index.json")).ok().and_then(|s| serde_json::from_str::<Vec<StoredNoteMetadata>>(&s).ok()).map(|v| v.len() as u32);
         let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"connecting","bytes":size}));
         match TcpStream::connect(format!("{}:{}", ip, port)) {
             Ok(mut stream) => {
                 let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"handshake"}));
-                if let Err(e) = send_header_and_wait_ack(&mut stream, "all", size, "outgoing_notes.zip") { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
+                let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: "all".into(), size, filename: "outgoing_notes.zip".into(), note_title: None, note_preview: None, notes_count: idx_count };
+                if let Err(e) = send_header_and_wait_ack(&mut stream, &header) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
                 // stream file with progress
                 let mut f = match fs::File::open(&tmp_zip){ Ok(f)=>f, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
                 if write_u64_be(&mut stream, size).is_err() { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":"Failed to write size"})); let _=fs::remove_file(&tmp_zip); return; }
@@ -526,11 +552,17 @@ pub fn start_send_note_to(app: AppHandle, note_id: String, ip: String, port: u16
         let tmp_zip = notes_dir_path.join("outgoing_single.zip");
         if let Err(e) = zip_single_note(&notes_dir_path, &note_id, &tmp_zip) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; }
         let size = fs::metadata(&tmp_zip).ok().and_then(|m| Some(m.len())).unwrap_or(0);
+        // load meta and preview
+        let title = fs::read_to_string(notes_dir_path.join("index.json")).ok()
+            .and_then(|s| serde_json::from_str::<Vec<StoredNoteMetadata>>(&s).ok())
+            .and_then(|v| v.into_iter().find(|m| m.id==note_id).map(|m| m.title));
+        let preview = fs::read_to_string(notes_dir_path.join(format!("{}.md", note_id))).ok().map(|c| preview_from_content(&c));
         let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"connecting","bytes":size}));
         match TcpStream::connect(format!("{}:{}", ip, port)) {
             Ok(mut stream) => {
                 let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"handshake"}));
-                if let Err(e) = send_header_and_wait_ack(&mut stream, "single", size, "outgoing_single.zip") { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
+                let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: "single".into(), size, filename: "outgoing_single.zip".into(), note_title: title, note_preview: preview, notes_count: None };
+                if let Err(e) = send_header_and_wait_ack(&mut stream, &header) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
                 if write_u64_be(&mut stream, size).is_err() { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":"Failed to write size"})); let _=fs::remove_file(&tmp_zip); return; }
                 let mut f = match fs::File::open(&tmp_zip){ Ok(f)=>f, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
                 let mut buf = [0u8; 8192];

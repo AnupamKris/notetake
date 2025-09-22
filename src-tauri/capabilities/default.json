@@ -24,6 +24,7 @@
     "send_note_to",
     "start_send_all_notes_to",
     "start_send_note_to",
-    "accept_incoming_transfer"
+    "accept_incoming_transfer",
+    "stop_receive_service"
   ]
 }

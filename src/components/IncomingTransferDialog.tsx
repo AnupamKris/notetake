@@ -7,6 +7,8 @@ type IncomingTransfer = {
   kind: string;
   size: number;
   filename: string;
+  note_title?: string;
+  note_preview?: string;
 };
 
 type Props = {
@@ -43,6 +45,14 @@ export default function IncomingTransferDialog({ open, offer, onAccept, onReject
                 <div className="text-muted-foreground text-xs truncate">{offer.filename} • {prettySize(offer.size)} • {offer.kind}</div>
               </div>
             </div>
+            {offer.note_title ? (
+              <div className="rounded border p-2 bg-muted/30">
+                <div className="font-medium text-sm truncate">{offer.note_title}</div>
+                {offer.note_preview ? (
+                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">{offer.note_preview}</pre>
+                ) : null}
+              </div>
+            ) : null}
             <div className="text-sm">Accept incoming notes?</div>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => onReject(offer.id)}>Reject</Button>
@@ -54,4 +64,3 @@ export default function IncomingTransferDialog({ open, offer, onAccept, onReject
     </Dialog>
   );
 }
-

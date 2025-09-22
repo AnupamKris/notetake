@@ -11,6 +11,7 @@ type StatusBarProps = {
   isNewNote?: boolean;
   updatedAt?: string;
   networkStatus?: string;
+  networkProgress?: number; // 0-100
 };
 
 function computeLineCol(text: string, index: number) {
@@ -48,6 +49,7 @@ export function StatusBar({
   isNewNote,
   updatedAt,
   networkStatus,
+  networkProgress,
 }: StatusBarProps) {
   const totalLines = content.length ? content.split(/\r?\n/).length : 1;
   const chars = content.length;
@@ -88,7 +90,17 @@ export function StatusBar({
       <span>Words {words}</span>
       <span>Chars {chars}</span>
       {selectionLength > 0 ? <span>Selected {selectionLength}</span> : null}
-      {statusParts.length > 0 ? <span className="ml-auto">{statusParts.join(" • ")}</span> : null}
+      <div className="ml-auto flex items-center gap-3">
+        {typeof networkProgress === "number" ? (
+          <div className="flex items-center gap-2 min-w-[140px]">
+            <div className="h-1 w-28 rounded bg-muted overflow-hidden">
+              <div className="h-1 bg-primary" style={{ width: `${Math.max(0, Math.min(100, networkProgress))}%` }} />
+            </div>
+            <span className="text-xs tabular-nums w-10 text-right">{Math.round(networkProgress)}%</span>
+          </div>
+        ) : null}
+        {statusParts.length > 0 ? <span>{statusParts.join(" • ")}</span> : null}
+      </div>
     </div>
   );
 }

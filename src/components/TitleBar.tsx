@@ -34,6 +34,8 @@ type TitleBarProps = {
   onSendAllNotes?: () => void;
   onSendCurrentNote?: () => void;
   onReceiveNotes?: () => void;
+  onStopReceiving?: () => void;
+  isReceiving?: boolean;
 };
 
 export function TitleBar({
@@ -55,6 +57,8 @@ export function TitleBar({
   onSendAllNotes,
   onSendCurrentNote,
   onReceiveNotes,
+  onStopReceiving,
+  isReceiving,
 }: TitleBarProps) {
   const appWindow = getCurrentWindow();
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -135,6 +139,7 @@ export function TitleBar({
               <MenubarItem onClick={onSendAllNotes}>Send Notes (All)</MenubarItem>
               <MenubarItem onClick={onSendCurrentNote} disabled={!hasActiveNote}>Send Current Note</MenubarItem>
               <MenubarItem onClick={onReceiveNotes}>Receive Notes</MenubarItem>
+              <MenubarItem onClick={onStopReceiving}>Stop Receiving</MenubarItem>
             </MenubarContent>
           </MenubarMenu>
           <MenubarMenu>
@@ -193,6 +198,15 @@ export function TitleBar({
         )}
       </div>
       <div className="no-drag flex items-center gap-1">
+        {isReceiving ? (
+          <div
+            className="hidden sm:flex items-center gap-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-2 py-1 text-[11px] mr-1"
+            title="Receiver listening on LAN"
+          >
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500"></span>
+            <span>Listening</span>
+          </div>
+        ) : null}
         {hasActiveNote ? (
           <>
             <Button

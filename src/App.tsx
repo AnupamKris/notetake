@@ -47,6 +47,7 @@ export default function App() {
   const [shareBusy, setShareBusy] = useState(false);
   const [shareMode, setShareMode] = useState<"all" | "current">("all");
   const [netStatus, setNetStatus] = useState("");
+  const [netProgress, setNetProgress] = useState<number | undefined>(undefined);
   const [incomingOpen, setIncomingOpen] = useState(false);
   const [incomingOffer, setIncomingOffer] = useState<{ id: string; peer: string; kind: string; size: number; filename: string } | null>(null);
 
@@ -215,6 +216,17 @@ export default function App() {
     }
   }
 
+  async function handleStopReceiving() {
+    try {
+      await invoke("stop_receive_service");
+      setNetStatus("Receiver stopped");
+      setTimeout(() => setNetStatus(""), 3000);
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to stop receiver");
+    }
+  }
+
   async function handleSendCurrentNote() {
     if (!activeNote) return;
     setShareMode("current");
@@ -260,8 +272,10 @@ export default function App() {
           if (p?.phase === "sending" && typeof p.sent === "number" && typeof p.total === "number") {
             const pct = p.total ? Math.min(100, Math.floor((p.sent * 100) / p.total)) : 0;
             setNetStatus(`Sending… ${pct}%`);
+            setNetProgress(pct);
           } else if (p?.phase) {
             setNetStatus(String(p.phase));
+            if (p?.phase !== "sending") setNetProgress(undefined);
           }
         })
       );
@@ -271,9 +285,11 @@ export default function App() {
           if (p?.ok) {
             toast.success(p?.message || "Sent");
             setNetStatus("Sent successfully");
+            setNetProgress(undefined);
           } else {
             toast.error(p?.message || "Send failed");
             setNetStatus("Send failed");
+            setNetProgress(undefined);
           }
           setTimeout(() => setNetStatus(""), 4000);
         })
@@ -291,7 +307,10 @@ export default function App() {
       unsubs.push(
         await listen("share://recv_status", ({ payload }) => {
           const p = payload as any;
-          if (p?.phase) setNetStatus(String(p.phase));
+          if (p?.phase) {
+            setNetStatus(String(p.phase));
+            // reflect listen/stop solely via status text
+          }
         })
       );
       unsubs.push(
@@ -398,6 +417,7 @@ export default function App() {
         onSendAllNotes={handleSendAllNotes}
         onSendCurrentNote={handleSendCurrentNote}
         onReceiveNotes={handleReceiveNotes}
+        onStopReceiving={handleStopReceiving}
       />
       <Toaster closeButton position="top-right" />
       <CommandPalette
@@ -461,6 +481,7 @@ export default function App() {
           isNewNote={isNewNote}
           updatedAt={activeNote?.updatedAt ?? ""}
           networkStatus={netStatus}
+          networkProgress={netProgress}
         />
       )}
       <ShareDialog

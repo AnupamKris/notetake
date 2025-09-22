@@ -21,6 +21,7 @@ export type EditorViewProps = {
   isNewNote: boolean;
   updatedAt: string;
   networkStatus?: string;
+  networkProgress?: number;
 };
 
 export default function EditorView(props: EditorViewProps) {
@@ -35,6 +36,7 @@ export default function EditorView(props: EditorViewProps) {
     isNewNote,
     updatedAt,
     networkStatus,
+    networkProgress,
   } = props;
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -174,6 +176,7 @@ export default function EditorView(props: EditorViewProps) {
         isNewNote={isNewNote}
         updatedAt={updatedAt}
         networkStatus={networkStatus}
+        networkProgress={networkProgress}
       />
     </main>
   );
