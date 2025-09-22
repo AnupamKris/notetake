@@ -18,6 +18,11 @@
     "save_note",
     "delete_note",
     "receive_notes",
-    "send_all_notes"
+    "send_all_notes",
+    "discover_receivers",
+    "send_all_notes_to",
+    "send_note_to",
+    "start_send_all_notes_to",
+    "start_send_note_to"
   ]
 }

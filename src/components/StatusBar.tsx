@@ -10,6 +10,7 @@ type StatusBarProps = {
   isSaving?: boolean;
   isNewNote?: boolean;
   updatedAt?: string;
+  networkStatus?: string;
 };
 
 function computeLineCol(text: string, index: number) {
@@ -46,6 +47,7 @@ export function StatusBar({
   isSaving,
   isNewNote,
   updatedAt,
+  networkStatus,
 }: StatusBarProps) {
   const totalLines = content.length ? content.split(/\r?\n/).length : 1;
   const chars = content.length;
@@ -53,6 +55,9 @@ export function StatusBar({
   const { line, col } = computeLineCol(content, caret);
   const statusParts: string[] = [];
 
+  if (networkStatus) {
+    statusParts.push(networkStatus);
+  }
   if (isSaving) {
     statusParts.push("Saving...");
   } else if (isNewNote) {

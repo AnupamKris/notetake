@@ -12,6 +12,8 @@ import {
 import { toast, Toaster } from "sonner";
 import TitleBar from "@/components/TitleBar";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import ShareDialog, { PeerInfo } from "@/components/ShareDialog";
 import useHotkeys from "@/hooks/use-hotkeys";
 import HomeView from "@/components/home/HomeView";
 import EditorView from "@/components/editor/EditorView";
@@ -39,6 +41,11 @@ export default function App() {
   const [showPreview, setShowPreview] = useState(true);
   const [showEditor, setShowEditor] = useState(true);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [peers, setPeers] = useState<PeerInfo[]>([]);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareMode, setShareMode] = useState<"all" | "current">("all");
+  const [netStatus, setNetStatus] = useState("");
 
   useEffect(() => {
     refreshNotes();
@@ -188,26 +195,120 @@ export default function App() {
   }
 
   async function handleSendAllNotes() {
-    try {
-      const res = await invoke<string>("send_all_notes", { waitSecs: 10 });
-      toast.success(res || "Notes sent");
-    } catch (e) {
-      console.error(e);
-      toast.error("No receiver found on network");
-    }
+    setShareMode("all");
+    setShareOpen(true);
   }
 
   async function handleReceiveNotes() {
-    toast.info("Waiting for sender… make sure both are on same Wi‑Fi");
+    setNetStatus("Waiting to receive…");
     try {
-      const res = await invoke<string>("receive_notes", { timeoutSecs: 120 });
-      await refreshNotes();
-      toast.success(res || "Received notes");
+      await invoke<string>("receive_notes", { timeoutSecs: 120 });
     } catch (e) {
       console.error(e);
       toast.error("Receive timed out or failed");
+      setNetStatus("Receive failed");
+    }
+    setTimeout(() => setNetStatus(""), 4000);
+  }
+
+  async function handleSendCurrentNote() {
+    if (!activeNote) return;
+    setShareMode("current");
+    setShareOpen(true);
+  }
+
+  async function refreshPeers() {
+    setShareBusy(true);
+    try {
+      const found = await invoke<PeerInfo[]>("discover_receivers", { waitSecs: 3 });
+      setPeers(found || []);
+    } catch (e) {
+      console.error(e);
+      setPeers([]);
+    } finally {
+      setShareBusy(false);
     }
   }
+
+  async function selectPeerAndSend(peer: PeerInfo) {
+    try {
+      setNetStatus(`Sending to ${peer.name || peer.ip}…`);
+      if (shareMode === "all") {
+        await invoke("start_send_all_notes_to", { ip: peer.ip, port: peer.port });
+      } else if (shareMode === "current" && activeNote) {
+        await invoke("start_send_note_to", { noteId: activeNote.id, ip: peer.ip, port: peer.port });
+      }
+      setShareOpen(false);
+    } catch (e) {
+      console.error(e);
+      toast.error("Send failed to start");
+      setNetStatus("Send failed");
+      setTimeout(() => setNetStatus(""), 4000);
+    }
+  }
+
+  useEffect(() => {
+    const unsubs: (() => void)[] = [];
+    (async () => {
+      unsubs.push(
+        await listen("share://send_status", ({ payload }) => {
+          const p = payload as any;
+          if (p?.phase === "sending" && typeof p.sent === "number" && typeof p.total === "number") {
+            const pct = p.total ? Math.min(100, Math.floor((p.sent * 100) / p.total)) : 0;
+            setNetStatus(`Sending… ${pct}%`);
+          } else if (p?.phase) {
+            setNetStatus(String(p.phase));
+          }
+        })
+      );
+      unsubs.push(
+        await listen("share://send_done", ({ payload }) => {
+          const p = payload as any;
+          if (p?.ok) {
+            toast.success(p?.message || "Sent");
+            setNetStatus("Sent successfully");
+          } else {
+            toast.error(p?.message || "Send failed");
+            setNetStatus("Send failed");
+          }
+          setTimeout(() => setNetStatus(""), 4000);
+        })
+      );
+      unsubs.push(
+        await listen("share://recv_status", ({ payload }) => {
+          const p = payload as any;
+          if (p?.phase) setNetStatus(String(p.phase));
+        })
+      );
+      unsubs.push(
+        await listen("share://recv_done", async ({ payload }) => {
+          const p = payload as any;
+          if (p?.ok) {
+            toast.success(p?.message || "Received notes");
+            await refreshNotes();
+            setNetStatus("Received notes");
+          } else {
+            toast.error(p?.message || "Receive failed");
+            setNetStatus("Receive failed");
+          }
+          setTimeout(() => setNetStatus(""), 4000);
+        })
+      );
+    })();
+    return () => { unsubs.forEach((u) => { try { u(); } catch {} }); };
+  }, []);
+
+  // Reflect discovery activity in status bar
+  useEffect(() => {
+    if (shareOpen && shareBusy) {
+      setNetStatus("Searching receivers…");
+    } else if (shareOpen && !shareBusy) {
+      setNetStatus(peers.length ? "Select a receiver" : "No receivers yet");
+    } else if (!shareOpen && !isSaving) {
+      // clear if dialog closed and not saving
+      setNetStatus("");
+    }
+  }, [shareOpen, shareBusy, peers.length, isSaving]);
 
   const sortedNotes = useMemo(() => sortByUpdated(notes), [notes]);
   // Keyboard shortcuts: mod = Ctrl on Windows/Linux, Cmd on macOS
@@ -259,7 +360,8 @@ export default function App() {
         onOpenPalette={() => setCmdOpen(true)}
         onBack={handleBack}
         onTitleChange={setTitle}
-        onSendNotes={handleSendAllNotes}
+        onSendAllNotes={handleSendAllNotes}
+        onSendCurrentNote={handleSendCurrentNote}
         onReceiveNotes={handleReceiveNotes}
       />
       <Toaster closeButton position="top-right" />
@@ -323,8 +425,18 @@ export default function App() {
           isSaving={isSaving}
           isNewNote={isNewNote}
           updatedAt={activeNote?.updatedAt ?? ""}
+          networkStatus={netStatus}
         />
       )}
+      <ShareDialog
+        open={shareOpen}
+        peers={peers}
+        busy={shareBusy}
+        onRefresh={refreshPeers}
+        onClose={() => setShareOpen(false)}
+        onSelect={selectPeerAndSend}
+        title={shareMode === "all" ? "Send All Notes" : "Send Current Note"}
+      />
     </div>
   );
 }

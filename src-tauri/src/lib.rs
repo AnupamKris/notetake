@@ -200,7 +200,12 @@ pub fn run() {
             save_note,
             delete_note,
             share::receive_notes,
-            share::send_all_notes
+            share::send_all_notes,
+            share::discover_receivers,
+            share::send_all_notes_to,
+            share::send_note_to,
+            share::start_send_all_notes_to,
+            share::start_send_note_to
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

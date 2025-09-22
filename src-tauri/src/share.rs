@@ -7,13 +7,15 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use time::macros::format_description;
 use uuid::Uuid;
+use if_addrs::{get_if_addrs, IfAddr};
 
 const DISCOVERY_PORT: u16 = 51515;
 const TRANSFER_PORT: u16 = 51516;
 const DISCOVERY_MAGIC: &str = "quickmark_discovery_v1";
+const TRANSFER_MAGIC: &str = "quickmark_transfer_v1";
 
 #[derive(Serialize, Deserialize)]
 struct DiscoveryPing {
@@ -24,11 +26,46 @@ struct DiscoveryPing {
     id: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PeerInfo {
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+    pub id: String,
+}
+
 fn host_name_fallback() -> String {
     hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "QuickMark".to_string())
+}
+
+fn directed_broadcasts() -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    if let Ok(ifaces) = get_if_addrs() {
+        for iface in ifaces {
+            if iface.is_loopback() { continue; }
+            if let IfAddr::V4(v4) = iface.addr {
+                let ip = v4.ip.octets();
+                let mask = v4.netmask.octets();
+                let bcast = [
+                    ip[0] | (!mask[0]),
+                    ip[1] | (!mask[1]),
+                    ip[2] | (!mask[2]),
+                    ip[3] | (!mask[3]),
+                ];
+                let addr = std::net::Ipv4Addr::from(bcast);
+                out.push(SocketAddr::from((addr, DISCOVERY_PORT)));
+            }
+        }
+    }
+    // Always include global broadcast as last resort
+    match format!("255.255.255.255:{}", DISCOVERY_PORT).parse::<SocketAddr>() {
+        Ok(a) => out.push(a),
+        Err(_) => {}
+    }
+    out
 }
 
 fn zip_notes_dir(dir: &Path, out_path: &Path) -> Result<(), String> {
@@ -77,6 +114,41 @@ fn unzip_into(dir: &Path, zip_path: &Path) -> Result<(), String> {
             std::io::copy(&mut f, &mut outfile).map_err(|e| e.to_string())?;
         }
     }
+    Ok(())
+}
+
+fn load_index_from(dir: &Path) -> Result<Vec<StoredNoteMetadata>, String> {
+    let p = dir.join("index.json");
+    if !p.exists() { return Ok(Vec::new()); }
+    let s = fs::read_to_string(p).map_err(|e| e.to_string())?;
+    let items: Vec<StoredNoteMetadata> = serde_json::from_str(&s).map_err(|e| e.to_string())?;
+    Ok(items)
+}
+
+fn zip_single_note(dir: &Path, note_id: &str, out_path: &Path) -> Result<(), String> {
+    let all = load_index_from(dir)?;
+    let meta = all.into_iter().find(|m| m.id == note_id)
+        .ok_or_else(|| "Note metadata not found".to_string())?;
+    let md_path = dir.join(format!("{}.md", note_id));
+    if !md_path.exists() { return Err("Note file not found".into()); }
+
+    let file = fs::File::create(out_path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    // index.json with single entry
+    let idx_json = serde_json::to_string_pretty(&vec![meta]).map_err(|e| e.to_string())?;
+    zip.start_file("index.json", options).map_err(|e| e.to_string())?;
+    zip.write_all(idx_json.as_bytes()).map_err(|e| e.to_string())?;
+
+    // the .md file
+    zip.start_file(format!("{}.md", note_id), options).map_err(|e| e.to_string())?;
+    let mut f = fs::File::open(md_path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    zip.write_all(&buf).map_err(|e| e.to_string())?;
+
+    zip.finish().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -144,76 +216,94 @@ fn recv_file(stream: &mut TcpStream, out_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize)]
+struct TransferHeader {
+    magic: String,
+    kind: String, // all | single
+    size: u64,
+    filename: String,
+}
+
+fn send_header_and_wait_ack(stream: &mut TcpStream, kind: &str, size: u64, filename: &str) -> Result<(), String> {
+    let header = TransferHeader { magic: TRANSFER_MAGIC.into(), kind: kind.into(), size, filename: filename.into() };
+    let data = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
+    let len: u32 = data.len() as u32;
+    stream.write_all(&len.to_be_bytes()).map_err(|e| e.to_string())?;
+    stream.write_all(&data).map_err(|e| e.to_string())?;
+    stream.flush().ok();
+    // Wait for small ACK "OK\n"
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let mut ack = [0u8; 3];
+    stream.read_exact(&mut ack).map_err(|e| e.to_string())?;
+    if &ack != b"OK\n" { return Err("Receiver did not ACK".into()); }
+    Ok(())
+}
+
+fn recv_header_and_ack(stream: &mut TcpStream) -> Result<TransferHeader, String> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
+    let len = u32::from_be_bytes(len_buf);
+    let mut data = vec![0u8; len as usize];
+    stream.read_exact(&mut data).map_err(|e| e.to_string())?;
+    let header: TransferHeader = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    if header.magic != TRANSFER_MAGIC { return Err("Bad transfer header".into()); }
+    stream.write_all(b"OK\n").map_err(|e| e.to_string())?;
+    Ok(header)
+}
+
 #[tauri::command]
 pub fn receive_notes(app: AppHandle, timeout_secs: Option<u64>) -> Result<String, String> {
     let timeout = timeout_secs.unwrap_or(120);
-    let notes_dir_path = notes_dir(&app)?;
-
-    // 1) Listen for discovery pings and reply
-    let udp = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).map_err(|e| e.to_string())?;
-    udp.set_read_timeout(Some(Duration::from_secs(timeout))).ok();
-    // 2) Prepare TCP listener
-    let listener = TcpListener::bind(("0.0.0.0", TRANSFER_PORT)).map_err(|e| e.to_string())?;
-    listener.set_nonblocking(false).ok();
-
-    // Wait for one discovery ping
-    let mut buf = [0u8; 2048];
-    let (n, from) = udp.recv_from(&mut buf).map_err(|e| e.to_string())?;
-    let msg: DiscoveryPing = serde_json::from_slice(&buf[..n]).map_err(|e| e.to_string())?;
-    if msg.magic != DISCOVERY_MAGIC || msg.kind != "ping" {
-        return Err("Unexpected discovery message".into());
-    }
-
-    let pong = DiscoveryPing {
-        magic: DISCOVERY_MAGIC.to_string(),
-        kind: "pong".into(),
-        name: host_name_fallback(),
-        transfer_port: TRANSFER_PORT,
-        id: Uuid::new_v4().to_string(),
-    };
-    let pong_bytes = serde_json::to_vec(&pong).map_err(|e| e.to_string())?;
-    udp.send_to(&pong_bytes, from).ok();
-
-    // 3) Accept one transfer
-    let (mut stream, peer_addr) = listener.accept().map_err(|e| e.to_string())?;
-    let zip_tmp = notes_dir_path.join("incoming_notes.zip");
-    recv_file(&mut stream, &zip_tmp)?;
-
-    // 4) Unzip into temp folder then merge index
-    let temp_extract = notes_dir_path.join("incoming_tmp");
-    if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
-    fs::create_dir_all(&temp_extract).map_err(|e| e.to_string())?;
-    unzip_into(&temp_extract, &zip_tmp)?;
-
-    // Load incoming index.json
-    let incoming_index_path = temp_extract.join("index.json");
-    let incoming_index_str = fs::read_to_string(&incoming_index_path).map_err(|e| e.to_string())?;
-    let incoming_index: Vec<StoredNoteMetadata> = serde_json::from_str(&incoming_index_str).map_err(|e| e.to_string())?;
-
-    // Copy *.md files
-    for entry in fs::read_dir(&temp_extract).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            let file_name = path.file_name().unwrap();
-            fs::copy(&path, notes_dir_path.join(file_name)).map_err(|e| e.to_string())?;
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let notes_dir_path = match notes_dir(&app_clone) { Ok(p) => p, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; } };
+        let udp = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) { Ok(s) => s, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        udp.set_read_timeout(Some(Duration::from_secs(timeout))).ok();
+        let listener = match TcpListener::bind(("0.0.0.0", TRANSFER_PORT)) { Ok(l) => l, Err(e) => { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        let _ = app_clone.emit("share://recv_status", &serde_json::json!({"phase":"listening"}));
+        let mut buf = [0u8; 2048];
+        let (n, from) = match udp.recv_from(&mut buf) { Ok(x)=>x, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":format!("Discovery error: {}", e)})); return; } };
+        let msg: DiscoveryPing = match serde_json::from_slice(&buf[..n]) { Ok(m)=>m, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        if msg.magic != DISCOVERY_MAGIC || msg.kind != "ping" { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":"Unexpected discovery message"})); return; }
+        let pong = DiscoveryPing { magic: DISCOVERY_MAGIC.to_string(), kind: "pong".into(), name: host_name_fallback(), transfer_port: TRANSFER_PORT, id: Uuid::new_v4().to_string() };
+        let pong_bytes = serde_json::to_vec(&pong).unwrap_or_default();
+        let _ = udp.send_to(&pong_bytes, from);
+        let _ = app_clone.emit("share://recv_status", &serde_json::json!({"phase":"awaiting_transfer","from":from.to_string()}));
+        let (mut stream, peer_addr) = match listener.accept() { Ok(x)=>x, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        // Handshake header
+        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(30))) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; }
+        let header = match recv_header_and_ack(&mut stream) { Ok(h)=>h, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; } };
+        let zip_tmp = notes_dir_path.join("incoming_notes.zip");
+        if let Err(e) = recv_file(&mut stream, &zip_tmp) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
+        let temp_extract = notes_dir_path.join("incoming_tmp");
+        let _ = fs::remove_dir_all(&temp_extract);
+        if let Err(e) = fs::create_dir_all(&temp_extract) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; }
+        if let Err(e) = unzip_into(&temp_extract, &zip_tmp) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
+        let incoming_index_path = temp_extract.join("index.json");
+        let incoming_index_str = match fs::read_to_string(&incoming_index_path) { Ok(s)=>s, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        let incoming_index: Vec<StoredNoteMetadata> = match serde_json::from_str(&incoming_index_str) { Ok(v)=>v, Err(e)=>{ let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e.to_string()})); return; } };
+        if let Ok(rd) = fs::read_dir(&temp_extract) {
+            for entry in rd {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                        if let Some(file_name) = path.file_name() { let _ = fs::copy(&path, notes_dir_path.join(file_name)); }
+                    }
+                }
+            }
         }
-    }
-
-    // Merge indices
-    let dest_index_path = notes_dir_path.join("index.json");
-    merge_index(&dest_index_path, &incoming_index)?;
-
-    // Cleanup
-    let _ = fs::remove_file(zip_tmp);
-    let _ = fs::remove_dir_all(temp_extract);
-
-    Ok(format!("Received notes from {peer_addr}"))
+        let dest_index_path = notes_dir_path.join("index.json");
+        if let Err(e) = merge_index(&dest_index_path, &incoming_index) { let _=app_clone.emit("share://recv_done", &serde_json::json!({"ok":false,"message":e})); return; }
+        let _ = fs::remove_file(zip_tmp);
+        let _ = fs::remove_dir_all(temp_extract);
+        let _ = app_clone.emit("share://recv_done", &serde_json::json!({"ok":true,"message":format!("Received {} bytes from {}", header.size, peer_addr)}));
+    });
+    Ok("started".into())
 }
 
 #[tauri::command]
 pub fn send_all_notes(app: AppHandle, wait_secs: Option<u64>) -> Result<String, String> {
-    // 1) Broadcast discovery ping
+    // 1) Broadcast discovery ping on all interfaces
     let timeout = wait_secs.unwrap_or(10);
     let udp = UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| e.to_string())?;
     udp.set_broadcast(true).ok();
@@ -226,10 +316,9 @@ pub fn send_all_notes(app: AppHandle, wait_secs: Option<u64>) -> Result<String, 
         id: Uuid::new_v4().to_string(),
     };
     let bytes = serde_json::to_vec(&ping).map_err(|e| e.to_string())?;
-    let bcast: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT)
-        .parse::<SocketAddr>()
-        .map_err(|e| e.to_string())?;
-    udp.send_to(&bytes, bcast).map_err(|e| e.to_string())?;
+    for addr in directed_broadcasts() {
+        let _ = udp.send_to(&bytes, addr);
+    }
 
     // 2) Wait for first pong
     udp.set_read_timeout(Some(Duration::from_secs(timeout))).ok();
@@ -256,4 +345,148 @@ pub fn send_all_notes(app: AppHandle, wait_secs: Option<u64>) -> Result<String, 
     let fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     let ts = time::OffsetDateTime::now_utc().format(fmt).unwrap_or_default();
     Ok(format!("Sent notes to {} at {}", target, ts))
+}
+
+#[tauri::command]
+pub fn discover_receivers(wait_secs: Option<u64>) -> Result<Vec<PeerInfo>, String> {
+    let timeout = wait_secs.unwrap_or(3);
+    let udp = UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| e.to_string())?;
+    udp.set_broadcast(true).ok();
+
+    let ping = DiscoveryPing {
+        magic: DISCOVERY_MAGIC.to_string(),
+        kind: "ping".into(),
+        name: host_name_fallback(),
+        transfer_port: TRANSFER_PORT,
+        id: Uuid::new_v4().to_string(),
+    };
+    let bytes = serde_json::to_vec(&ping).map_err(|e| e.to_string())?;
+    for addr in directed_broadcasts() { let _ = udp.send_to(&bytes, addr); }
+
+    udp.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    let start = std::time::Instant::now();
+    let mut peers: Vec<PeerInfo> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    while start.elapsed() < Duration::from_secs(timeout) {
+        let mut buf = [0u8; 2048];
+        match udp.recv_from(&mut buf) {
+            Ok((n, from)) => {
+                if let Ok(msg) = serde_json::from_slice::<DiscoveryPing>(&buf[..n]) {
+                    if msg.magic == DISCOVERY_MAGIC && msg.kind == "pong" {
+                        let ip = from.ip().to_string();
+                        if seen.insert(format!("{}:{}", ip, msg.transfer_port)) {
+                            peers.push(PeerInfo { name: msg.name, ip, port: msg.transfer_port, id: msg.id });
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
+                    // continue loop until total timeout
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(peers)
+}
+
+fn send_zip_to(zip_path: &Path, ip: &str, port: u16) -> Result<String, String> {
+    let target: SocketAddr = format!("{}:{}", ip, port).parse::<SocketAddr>().map_err(|e| e.to_string())?;
+    let mut stream = TcpStream::connect(target).map_err(|e| e.to_string())?;
+    let size = fs::metadata(zip_path).map_err(|e| e.to_string())?.len();
+    send_header_and_wait_ack(&mut stream, "all", size, zip_path.file_name().and_then(|s| s.to_str()).unwrap_or("notes.zip"))?;
+    send_file(&mut stream, zip_path)?;
+    Ok(format!("Sent to {}", target))
+}
+
+#[tauri::command]
+pub fn send_all_notes_to(app: AppHandle, ip: String, port: u16) -> Result<String, String> {
+    let notes_dir_path = notes_dir(&app)?;
+    let tmp_zip = notes_dir_path.join("outgoing_notes.zip");
+    zip_notes_dir(&notes_dir_path, &tmp_zip)?;
+    let res = send_zip_to(&tmp_zip, &ip, port);
+    let _ = fs::remove_file(tmp_zip);
+    res
+}
+
+#[tauri::command]
+pub fn send_note_to(app: AppHandle, note_id: String, ip: String, port: u16) -> Result<String, String> {
+    let notes_dir_path = notes_dir(&app)?;
+    let tmp_zip = notes_dir_path.join("outgoing_single.zip");
+    zip_single_note(&notes_dir_path, &note_id, &tmp_zip)?;
+    let res = send_zip_to(&tmp_zip, &ip, port);
+    let _ = fs::remove_file(tmp_zip);
+    res
+}
+
+#[tauri::command]
+pub fn start_send_all_notes_to(app: AppHandle, ip: String, port: u16) -> Result<(), String> {
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"preparing"}));
+        let notes_dir_path = match notes_dir(&app_clone) { Ok(p)=>p, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; } };
+        let tmp_zip = notes_dir_path.join("outgoing_notes.zip");
+        if let Err(e) = zip_notes_dir(&notes_dir_path, &tmp_zip) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; }
+        let size = fs::metadata(&tmp_zip).ok().and_then(|m| Some(m.len())).unwrap_or(0);
+        let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"connecting","bytes":size}));
+        match TcpStream::connect(format!("{}:{}", ip, port)) {
+            Ok(mut stream) => {
+                let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"handshake"}));
+                if let Err(e) = send_header_and_wait_ack(&mut stream, "all", size, "outgoing_notes.zip") { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
+                // stream file with progress
+                let mut f = match fs::File::open(&tmp_zip){ Ok(f)=>f, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
+                if write_u64_be(&mut stream, size).is_err() { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":"Failed to write size"})); let _=fs::remove_file(&tmp_zip); return; }
+                let mut buf = [0u8; 8192];
+                let mut sent: u64 = 0;
+                loop {
+                    let n = match f.read(&mut buf) { Ok(n)=>n, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
+                    if n==0 { break; }
+                    if let Err(e) = stream.write_all(&buf[..n]) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; }
+                    sent += n as u64;
+                    let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"sending","sent":sent,"total":size}));
+                }
+                let _ = app_clone.emit("share://send_done", &serde_json::json!({"ok":true,"message":"Sent"}));
+            }
+            Err(e) => { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); }
+        }
+        let _ = fs::remove_file(&tmp_zip);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_send_note_to(app: AppHandle, note_id: String, ip: String, port: u16) -> Result<(), String> {
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"preparing"}));
+        let notes_dir_path = match notes_dir(&app_clone) { Ok(p)=>p, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; } };
+        let tmp_zip = notes_dir_path.join("outgoing_single.zip");
+        if let Err(e) = zip_single_note(&notes_dir_path, &note_id, &tmp_zip) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); return; }
+        let size = fs::metadata(&tmp_zip).ok().and_then(|m| Some(m.len())).unwrap_or(0);
+        let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"connecting","bytes":size}));
+        match TcpStream::connect(format!("{}:{}", ip, port)) {
+            Ok(mut stream) => {
+                let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"handshake"}));
+                if let Err(e) = send_header_and_wait_ack(&mut stream, "single", size, "outgoing_single.zip") { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e})); let _=fs::remove_file(&tmp_zip); return; }
+                if write_u64_be(&mut stream, size).is_err() { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":"Failed to write size"})); let _=fs::remove_file(&tmp_zip); return; }
+                let mut f = match fs::File::open(&tmp_zip){ Ok(f)=>f, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
+                let mut buf = [0u8; 8192];
+                let mut sent: u64 = 0;
+                loop {
+                    let n = match f.read(&mut buf) { Ok(n)=>n, Err(e)=>{ let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; } };
+                    if n==0 { break; }
+                    if let Err(e) = stream.write_all(&buf[..n]) { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); let _=fs::remove_file(&tmp_zip); return; }
+                    sent += n as u64;
+                    let _ = app_clone.emit("share://send_status", &serde_json::json!({"phase":"sending","sent":sent,"total":size}));
+                }
+                let _ = app_clone.emit("share://send_done", &serde_json::json!({"ok":true,"message":"Sent"}));
+            }
+            Err(e) => { let _=app_clone.emit("share://send_done", &serde_json::json!({"ok":false,"message":e.to_string()})); }
+        }
+        let _ = fs::remove_file(&tmp_zip);
+    });
+    Ok(())
 }
