@@ -48,6 +48,7 @@ export default function App() {
   const [shareMode, setShareMode] = useState<"all" | "current">("all");
   const [netStatus, setNetStatus] = useState("");
   const [netProgress, setNetProgress] = useState<number | undefined>(undefined);
+  const [isReceiving, setIsReceiving] = useState(false);
   const [incomingOpen, setIncomingOpen] = useState(false);
   const [incomingOffer, setIncomingOffer] = useState<{ id: string; peer: string; kind: string; size: number; filename: string } | null>(null);
 
@@ -208,6 +209,7 @@ export default function App() {
     try {
       await invoke<string>("start_receive_service");
       toast.success("Now listening for incoming shares");
+      setIsReceiving(true);
     } catch (e) {
       console.error(e);
       toast.error("Failed to start receiver");
@@ -220,6 +222,7 @@ export default function App() {
     try {
       await invoke("stop_receive_service");
       setNetStatus("Receiver stopped");
+      setIsReceiving(false);
       setTimeout(() => setNetStatus(""), 3000);
     } catch (e) {
       console.error(e);
@@ -309,7 +312,8 @@ export default function App() {
           const p = payload as any;
           if (p?.phase) {
             setNetStatus(String(p.phase));
-            // reflect listen/stop solely via status text
+            if (p.phase === "listening") setIsReceiving(true);
+            if (p.phase === "stopped") setIsReceiving(false);
           }
         })
       );
@@ -418,6 +422,7 @@ export default function App() {
         onSendCurrentNote={handleSendCurrentNote}
         onReceiveNotes={handleReceiveNotes}
         onStopReceiving={handleStopReceiving}
+        isReceiving={isReceiving}
       />
       <Toaster closeButton position="top-right" />
       <CommandPalette
